@@ -688,15 +688,29 @@ function fetchWithTimeout(url, ms) {
 
 async function fetchProxy(targetUrl) {
   const proxies = [
+    // allorigins.win – raw mode (plain HTML, no JSON unwrapping needed)
+    async function() {
+      const res = await fetchWithTimeout('https://api.allorigins.win/raw?url=' + encodeURIComponent(targetUrl));
+      if (!res.ok) throw new Error('allorigins-raw HTTP ' + res.status);
+      return res.text();
+    },
+    // corsproxy.io – URL goes directly after '?', NOT as a named parameter
+    async function() {
+      const res = await fetchWithTimeout('https://corsproxy.io/?' + encodeURIComponent(targetUrl));
+      if (!res.ok) throw new Error('corsproxy HTTP ' + res.status);
+      return res.text();
+    },
+    // allorigins.win – JSON mode (fallback if raw mode fails)
     async function() {
       const res = await fetchWithTimeout('https://api.allorigins.win/get?url=' + encodeURIComponent(targetUrl));
       if (!res.ok) throw new Error('allorigins HTTP ' + res.status);
       const json = await res.json();
       return json.contents || null;
     },
+    // codetabs proxy – third-party fallback
     async function() {
-      const res = await fetchWithTimeout('https://corsproxy.io/?url=' + encodeURIComponent(targetUrl));
-      if (!res.ok) throw new Error('corsproxy HTTP ' + res.status);
+      const res = await fetchWithTimeout('https://api.codetabs.com/v1/proxy?quest=' + encodeURIComponent(targetUrl));
+      if (!res.ok) throw new Error('codetabs HTTP ' + res.status);
       return res.text();
     },
   ];
@@ -777,7 +791,7 @@ async function scrapeCompetitorPrices(product, targets) {
 
   const sets = await Promise.all(searches.map(async function(s) {
     const q   = buildDDGQuery(product, s.key);
-    const url = 'https://html.duckduckgo.com/html/?q=' + encodeURIComponent(q) + '&kl=pl-pl';
+    const url = 'https://html.duckduckgo.com/html/?q=' + encodeURIComponent(q) + '&kl=pl-pl&ia=web';
     const html = await fetchProxy(url);
     return parseDDGHtml(html, s.label);
   }));
@@ -854,7 +868,7 @@ function renderResults(results, myPrice) {
   const resultsArea = document.getElementById('resultsArea');
 
   if (!results || results.length === 0) {
-    resultsArea.innerHTML = `<div class="no-results">No competitor prices found for this product. Try a different product or check if EAN is available.</div>`;
+    resultsArea.innerHTML = `<div class="no-results">No competitor prices found. This can happen when all CORS proxies are blocked or rate-limited. Try again in a moment, or ensure the product has a brand and name filled in.</div>`;
     return;
   }
 
