@@ -483,10 +483,10 @@
   </div>
 </header>
 
-<div class="apikey-banner">
+<div class="apikey-banner" id="searchModeBanner">
   <span>🔍</span>
-  <strong style="color:var(--text)">Free Scraping Mode</strong>
-  <span>No API key required — searches use free public web search (DuckDuckGo) via CORS proxy.</span>
+  <strong style="color:var(--text)" id="searchModeLabel">Free Scraping Mode</strong>
+  <span id="searchModeDesc">No API key required — searches use free public web search (DuckDuckGo) via CORS proxy.</span>
   <span style="margin-left:auto;font-size:11px;">Results are scraped from real listings · click any link to verify the price</span>
 </div>
 
@@ -647,7 +647,7 @@ function renderDetail() {
           </div>
         </div>
         <div class="api-notice">
-          <strong>How it works:</strong> Clicking Search queries DuckDuckGo for real listings of this product on Allegro, online shops, and the web. Results include actual prices, seller names and direct links — no AI, no hallucinations.
+          <strong>How it works:</strong> When the product has an EAN, results are fetched from Google Custom Search first (cx=4202aa0e1420e4afb). If Google returns no results, DuckDuckGo is used as a fallback. Results include prices, seller names and direct links.
         </div>
         <button class="btn btn-primary" id="searchBtn" onclick="runSearch()">
           🔍 Search Competitor Prices
@@ -670,6 +670,65 @@ function toggleTarget(t) {
   } else {
     selectedTargets.add(t);
     el.classList.add('selected');
+  }
+}
+
+// ─── GOOGLE CUSTOM SEARCH ──────────────────────────────────────────────────
+// API key is injected at deploy time from the Google_Search GitHub secret.
+// If the placeholder was not replaced, Google search is silently skipped.
+const GOOGLE_SEARCH_API_KEY = '__GOOGLE_SEARCH_API_KEY__';
+const GOOGLE_SEARCH_CX      = '4202aa0e1420e4afb';
+
+async function searchEANWithGoogle(ean) {
+  if (!GOOGLE_SEARCH_API_KEY || GOOGLE_SEARCH_API_KEY === '__GOOGLE_SEARCH_API_KEY__') {
+    return [];
+  }
+  try {
+    const url = 'https://www.googleapis.com/customsearch/v1'
+      + '?q='   + encodeURIComponent(ean)
+      + '&key=' + encodeURIComponent(GOOGLE_SEARCH_API_KEY)
+      + '&cx='  + encodeURIComponent(GOOGLE_SEARCH_CX)
+      + '&num=10';
+    const res = await fetchWithTimeout(url, 12000);
+    if (!res.ok) {
+      console.warn('Google Custom Search HTTP', res.status);
+      return [];
+    }
+    const data = await res.json();
+    if (!data.items || data.items.length === 0) return [];
+
+    return data.items.map(function(item) {
+      const text = (item.title || '') + ' ' + (item.snippet || '');
+      const priceRx = /(\d[\d\s\xa0]*[,.]?\d*)\s*(zł|PLN|€|EUR)/i;
+      let price = null, currency = 'PLN';
+      const pm = text.match(priceRx);
+      if (pm) {
+        price = parseFloat(pm[1].replace(/[\s\xa0]/g, '').replace(',', '.'));
+        currency = /€|EUR/i.test(pm[2]) ? 'EUR' : 'PLN';
+        if (isNaN(price) || price <= 0 || price > 50000) price = null;
+      }
+      const domain = (item.displayLink || '').toLowerCase();
+      let source = 'Google Search';
+      if      (domain.includes('allegro')) source = 'Allegro';
+      else if (domain.includes('empik'))   source = 'Empik';
+      else if (domain.includes('zalando')) source = 'Zalando';
+      else if (domain.includes('ceneo'))   source = 'Ceneo';
+      else if (domain.includes('olx'))     source = 'OLX';
+      return {
+        source,
+        title:    item.title   || '',
+        price,
+        currency,
+        url:      item.link    || '',
+        seller:   item.displayLink || '',
+        notes:    (item.snippet || '').length > 120
+                    ? item.snippet.slice(0, 120) + '…'
+                    : (item.snippet || ''),
+      };
+    });
+  } catch(err) {
+    console.warn('Google Custom Search error:', err.message);
+    return [];
   }
 }
 
@@ -832,14 +891,31 @@ async function runSearch() {
   }, 2500);
 
   try {
-    const results = await scrapeCompetitorPrices(p, selectedTargets);
+    let results = [];
+    let searchSource = 'web';
+
+    // Try Google Custom Search first when the product has an EAN
+    if (p.e && GOOGLE_SEARCH_API_KEY !== '__GOOGLE_SEARCH_API_KEY__') {
+      const loadingEl = document.getElementById('loadingStatus');
+      if (loadingEl) loadingEl.innerHTML = '<span class="spinner"></span> Searching Google Custom Search by EAN…';
+      results = await searchEANWithGoogle(p.e);
+      if (results.length > 0) searchSource = 'google';
+    }
+
+    // Fall back to DuckDuckGo scraping if Google returned nothing
+    if (results.length === 0) {
+      const loadingEl = document.getElementById('loadingStatus');
+      if (loadingEl) loadingEl.innerHTML = '<span class="spinner"></span> Searching with DuckDuckGo…';
+      results = await scrapeCompetitorPrices(p, selectedTargets);
+      searchSource = 'ddg';
+    }
 
     clearInterval(progressInterval);
     clearInterval(statusInterval);
     const bar = document.getElementById('loadingBar');
     if (bar) bar.style.width = '100%';
 
-    renderResults(results, myPrice);
+    renderResults(results, myPrice, searchSource);
   } catch(err) {
     clearInterval(progressInterval);
     clearInterval(statusInterval);
@@ -850,7 +926,7 @@ async function runSearch() {
   btn.innerHTML = '🔍 Search Again';
 }
 
-function renderResults(results, myPrice) {
+function renderResults(results, myPrice, searchSource) {
   const resultsArea = document.getElementById('resultsArea');
 
   if (!results || results.length === 0) {
@@ -873,7 +949,7 @@ function renderResults(results, myPrice) {
   const similarCount = withPrice.length - cheaperCount - dearerCount;
 
   resultsArea.innerHTML = `
-    <div class="section-title">Competitor Analysis — ${results.length} listings found</div>
+    <div class="section-title">Competitor Analysis — ${results.length} listings found${searchSource === 'google' ? ' <span style="color:var(--green);font-size:10px;margin-left:8px;">via Google Custom Search</span>' : searchSource === 'ddg' ? ' <span style="color:var(--muted);font-size:10px;margin-left:8px;">via DuckDuckGo</span>' : ''}</div>
     <div class="summary-cards">
       <div class="summary-card">
         <div class="s-value" style="color:var(--green)">${cheaperCount}</div>
@@ -922,6 +998,15 @@ function renderResults(results, myPrice) {
       }).join('')}
     </div>
   `;
+}
+
+// Update banner to reflect search mode
+if (GOOGLE_SEARCH_API_KEY !== '__GOOGLE_SEARCH_API_KEY__') {
+  const lbl  = document.getElementById('searchModeLabel');
+  const desc = document.getElementById('searchModeDesc');
+  if (lbl)  lbl.textContent  = 'Google Custom Search + DuckDuckGo';
+  if (desc) desc.textContent =
+    'EAN lookups use Google Custom Search (cx=4202aa0e1420e4afb) · falls back to DuckDuckGo when EAN is unavailable.';
 }
 
 // Initial render
