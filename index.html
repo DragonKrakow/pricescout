@@ -679,25 +679,20 @@ function toggleTarget(t) {
 const GOOGLE_SEARCH_API_KEY = '__GOOGLE_SEARCH_API_KEY__';
 const GOOGLE_SEARCH_CX      = '4202aa0e1420e4afb';
 
-async function searchEANWithGoogle(ean) {
+async function searchEANWithGoogle(product) {
   if (!GOOGLE_SEARCH_API_KEY || GOOGLE_SEARCH_API_KEY === '__GOOGLE_SEARCH_API_KEY__') {
     return [];
   }
-  try {
-    const url = 'https://www.googleapis.com/customsearch/v1'
-      + '?q='   + encodeURIComponent(ean)
-      + '&key=' + encodeURIComponent(GOOGLE_SEARCH_API_KEY)
-      + '&cx='  + encodeURIComponent(GOOGLE_SEARCH_CX)
-      + '&num=10';
-    const res = await fetchWithTimeout(url, 12000);
-    if (!res.ok) {
-      console.warn('Google Custom Search HTTP', res.status);
-      return [];
-    }
-    const data = await res.json();
-    if (!data.items || data.items.length === 0) return [];
 
-    return data.items.map(function(item) {
+  // Build search queries: first by EAN alone, then by EAN + brand/name as fallback.
+  const queries = [product.e || ''];
+  if (product.b || product.n) {
+    const fallback = [product.e, product.b, product.n].filter(Boolean).join(' ').slice(0, 128);
+    if (fallback !== queries[0]) queries.push(fallback);
+  }
+
+  function mapItems(items) {
+    return items.map(function(item) {
       const text = (item.title || '') + ' ' + (item.snippet || '');
       const priceRx = /(\d[\d\s\xa0]*[,.]?\d*)\s*(zł|PLN|€|EUR)/i;
       let price = null, currency = 'PLN';
@@ -708,7 +703,7 @@ async function searchEANWithGoogle(ean) {
         if (isNaN(price) || price <= 0 || price > 50000) price = null;
       }
       const domain = (item.displayLink || '').toLowerCase();
-      let source = 'Google Search';
+      let source = 'Google Custom Search';
       if      (domain.includes('allegro')) source = 'Allegro';
       else if (domain.includes('empik'))   source = 'Empik';
       else if (domain.includes('zalando')) source = 'Zalando';
@@ -726,10 +721,37 @@ async function searchEANWithGoogle(ean) {
                     : (item.snippet || ''),
       };
     });
-  } catch(err) {
-    console.warn('Google Custom Search error:', err.message);
-    return [];
   }
+
+  for (const query of queries) {
+    try {
+      const url = 'https://www.googleapis.com/customsearch/v1'
+        + '?q='   + encodeURIComponent(query)
+        + '&key=' + encodeURIComponent(GOOGLE_SEARCH_API_KEY)
+        + '&cx='  + encodeURIComponent(GOOGLE_SEARCH_CX)
+        + '&num=10';
+      const res = await fetchWithTimeout(url, 12000);
+      if (!res.ok) {
+        const errText = await res.text().catch(() => '');
+        console.warn('Google Custom Search HTTP ' + res.status, errText.slice(0, 300));
+        return [];
+      }
+      const data = await res.json();
+      if (data.error) {
+        console.warn('Google Custom Search API error:', data.error.code, data.error.message);
+        return [];
+      }
+      if (!data.items || data.items.length === 0) {
+        console.log('Google Custom Search: no results for query:', query);
+        continue;
+      }
+      return mapItems(data.items);
+    } catch(err) {
+      console.warn('Google Custom Search error:', err.message);
+      return [];
+    }
+  }
+  return [];
 }
 
 // ─── FREE SCRAPING ENGINE (no API key required) ────────────────────────────
@@ -898,7 +920,7 @@ async function runSearch() {
     if (p.e && GOOGLE_SEARCH_API_KEY !== '__GOOGLE_SEARCH_API_KEY__') {
       const loadingEl = document.getElementById('loadingStatus');
       if (loadingEl) loadingEl.innerHTML = '<span class="spinner"></span> Searching Google Custom Search by EAN…';
-      results = await searchEANWithGoogle(p.e);
+      results = await searchEANWithGoogle(p);
       if (results.length > 0) searchSource = 'google';
     }
 
