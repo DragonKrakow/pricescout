@@ -1,0 +1,50 @@
+name: Deploy PriceScout to GitHub Pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Inject Google Search API key
+        env:
+          GOOGLE_SEARCH_API_KEY: ${{ secrets.Google_Search }}
+        run: |
+          # Replace the placeholder with the real API key from the secret.
+          # If the secret is not set, the placeholder remains and Google search is skipped.
+          if [ -n "$GOOGLE_SEARCH_API_KEY" ]; then
+            sed -i "s|__GOOGLE_SEARCH_API_KEY__|${GOOGLE_SEARCH_API_KEY}|g" index.html
+            echo "Google Search API key injected."
+          else
+            echo "Google_Search secret is not set — Google Custom Search will be skipped at runtime."
+          fi
+
+      - name: Setup Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: '.'
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
